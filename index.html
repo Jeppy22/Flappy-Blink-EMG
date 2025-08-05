@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flappy Bird EMG</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Press Start 2P', cursive;
+            /* Added a subtle gradient background */
+            background: linear-gradient(to bottom, #1e3a8a, #111827);
+            color: #f3f4f6;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        canvas {
+            background: #87CEEB; /* Sky blue canvas background */
+            display: block;
+            /* Added a more prominent border and inner shadow */
+            border: 4px solid #f3f4f6;
+            border-radius: 16px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.3), inset 0 0 15px rgba(0,0,0,0.2);
+        }
+        .container {
+            text-align: center;
+        }
+        #infoPanel {
+            /* Improved styling for the info panel */
+            background-color: rgba(0, 0, 0, 0.6);
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            padding: 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 1.5rem;
+            max-width: 600px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        }
+        #title {
+            /* Added a cool text shadow to the title */
+            text-shadow: 3px 3px 0px #9333ea;
+        }
+        .status-dot {
+            height: 12px;
+            width: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        .status-dot.bg-green-500 {
+            animation: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1 id="title" class="text-5xl mb-6">Flappy Blink</h1>
+    <div id="infoPanel" class="text-left text-sm">
+        <p><span id="ws-status-dot" class="status-dot bg-red-500"></span>WebSocket: <span id="ws-status">Connecting...</span></p>
+        <p>Last Signal Value: <span id="signalValue" class="font-bold text-yellow-300">N/A</span></p>
+        <p>Blink Threshold: <span id="thresholdValue" class="font-bold text-cyan-300">...</span> (Calibrating...)</p>
+        <p class="mt-2 text-gray-400">Instructions: With the bridge running, **CLICK THE GAME TO START** and blink to make the bird jump!</p>
+    </div>
+    <canvas id="gameCanvas" width="600" height="400"></canvas>
+</div>
+
+<script>
+    // --- Game Configuration ---
+    let BLINK_THRESHOLD = 50; 
+
+    // --- DOM Elements ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const wsStatus = document.getElementById('ws-status');
+    const wsStatusDot = document.getElementById('ws-status-dot');
+    const signalValueEl = document.getElementById('signalValue');
+    const thresholdValueEl = document.getElementById('thresholdValue');
+
+    // --- Game State Variables ---
+    let bird, pipes, score, highScore, gameState, frame, clouds;
+    let isCalibrating = true;
+    let calibrationData = [];
+    let lastJumpTime = 0;
+
+    // --- High Score Initialization ---
+    highScore = localStorage.getItem('flappyBlinkHighScore') || 0;
+
+    // --- Bird Object ---
+    const birdProps = {
+        x: 50,
+        y: 150,
+        width: 40,
+        height: 30,
+        gravity: 0.4,
+        lift: -8,
+        velocity: 0,
+        wingFrame: 0, // For wing animation
+        draw: function() {
+            ctx.save();
+            ctx.translate(this.x + this.width / 2, this.y + this.height / 2);
+            ctx.rotate(this.velocity * 0.05); // Bird tilts as it moves
+            
+            // Body
+            ctx.fillStyle = 'yellow';
+            ctx.beginPath();
+            ctx.arc(0, 0, this.height / 2 + 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#facc15'; // A slightly darker yellow for shading
+            ctx.beginPath();
+            ctx.arc(0, 5, this.height / 2, 0, Math.PI);
+            ctx.fill();
+
+            // Wing animation
+            const wingY = Math.sin(this.wingFrame * 0.4) * 5 - 3;
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath();
+            ctx.ellipse(-5, wingY, 12, 6, Math.PI / 4, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Eye
+            ctx.fillStyle = 'white';
+            ctx.beginPath();
+            ctx.arc(8, -5, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = 'black';
+            ctx.beginPath();
+            ctx.arc(9, -5, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Beak
+            ctx.fillStyle = '#f97316';
+            ctx.beginPath();
+            ctx.moveTo(15, -2);
+            ctx.lineTo(25, 2);
+            ctx.lineTo(15, 6);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.restore();
+        },
+        update: function() {
+            this.velocity += this.gravity;
+            this.y += this.velocity;
+            this.wingFrame++;
+
+            if (this.y + this.height > canvas.height) {
+                this.y = canvas.height - this.height;
+                this.velocity = 0;
+            }
+            if (this.y < 0) {
+                this.y = 0;
+                this.velocity = 0;
+            }
+        },
+        jump: function() {
+            this.velocity = this.lift;
+        }
+    };
+
+    // --- Pipe Object ---
+    const pipeProps = {
+        width: 60, // Wider pipes
+        gap: 150,
+        speed: 3,
+        draw: function() {
+            pipes.forEach(pipe => {
+                // Pipe body gradient
+                const gradient = ctx.createLinearGradient(pipe.x, 0, pipe.x + this.width, 0);
+                gradient.addColorStop(0, '#78be20');
+                gradient.addColorStop(0.5, '#5a9b20');
+                gradient.addColorStop(1, '#78be20');
+                ctx.fillStyle = gradient;
+                
+                ctx.fillRect(pipe.x, 0, this.width, pipe.top);
+                ctx.fillRect(pipe.x, canvas.height - pipe.bottom, this.width, pipe.bottom);
+
+                // Pipe cap
+                const capHeight = 20;
+                ctx.fillRect(pipe.x - 5, pipe.top - capHeight, this.width + 10, capHeight);
+                ctx.fillRect(pipe.x - 5, canvas.height - pipe.bottom, this.width + 10, capHeight);
+            });
+        },
+        update: function() {
+            if (frame % 100 === 0) {
+                const top = Math.random() * (canvas.height - this.gap - 80) + 40;
+                pipes.push({
+                    x: canvas.width,
+                    top: top,
+                    bottom: canvas.height - top - this.gap,
+                    passed: false
+                });
+            }
+            pipes.forEach(pipe => { pipe.x -= this.speed; });
+            pipes = pipes.filter(pipe => pipe.x + this.width > 0);
+        }
+    };
+
+    // --- Cloud Object for Parallax Background ---
+    const cloudProps = {
+        speed: 1,
+        draw: function() {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            clouds.forEach(cloud => {
+                ctx.beginPath();
+                ctx.arc(cloud.x, cloud.y, cloud.size, 0, Math.PI * 2);
+                ctx.arc(cloud.x + cloud.size * 0.8, cloud.y, cloud.size * 0.8, 0, Math.PI * 2);
+                ctx.arc(cloud.x - cloud.size * 0.8, cloud.y, cloud.size * 0.7, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        },
+        update: function() {
+            if (frame % 150 === 0) { // Add a new cloud periodically
+                clouds.push({
+                    x: canvas.width + 50,
+                    y: Math.random() * (canvas.height / 2),
+                    size: Math.random() * 20 + 15
+                });
+            }
+            clouds.forEach(cloud => { cloud.x -= this.speed; });
+            clouds = clouds.filter(cloud => cloud.x > -100);
+        }
+    };
+
+    // --- Game Logic Functions ---
+    function resetGame() {
+        bird = Object.assign({}, birdProps);
+        pipes = [];
+        clouds = [];
+        score = 0;
+        frame = 0;
+        gameState = 'start';
+        isCalibrating = true;
+        thresholdValueEl.textContent = `Blinking...`;
+    }
+
+    function gameLoop() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        cloudProps.update();
+        cloudProps.draw();
+
+        if (gameState === 'playing') {
+            frame++;
+            bird.update();
+            pipeProps.update();
+            checkCollisions();
+            updateScore();
+        }
+
+        bird.draw();
+        pipeProps.draw();
+        drawScore();
+        drawGameState();
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    function checkCollisions() {
+        if (bird.y + bird.height >= canvas.height) { setGameOver(); }
+        for (let pipe of pipes) {
+            if (bird.x < pipe.x + pipeProps.width &&
+                bird.x + bird.width > pipe.x &&
+                (bird.y < pipe.top || bird.y + bird.height > canvas.height - pipe.bottom)) {
+                setGameOver();
+                return;
+            }
+        }
+    }
+    
+    function setGameOver() {
+        if (gameState !== 'over') {
+            gameState = 'over';
+            if (score > highScore) {
+                highScore = score;
+                localStorage.setItem('flappyBlinkHighScore', highScore);
+            }
+        }
+    }
+
+    function updateScore() {
+        for (let pipe of pipes) {
+            if (pipe.x + pipeProps.width < bird.x && !pipe.passed) {
+                score++;
+                pipe.passed = true;
+            }
+        }
+    }
+
+    function drawScore() {
+        ctx.fillStyle = 'white';
+        ctx.strokeStyle = 'black';
+        ctx.lineWidth = 2;
+        ctx.font = '35px "Press Start 2P"';
+        ctx.textAlign = 'center';
+        ctx.strokeText(score, canvas.width / 2, 50);
+        ctx.fillText(score, canvas.width / 2, 50);
+    }
+
+    function drawGameState() {
+        if (gameState === 'start' || gameState === 'over') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.fillStyle = 'white';
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 2;
+            ctx.textAlign = 'center';
+
+            if (gameState === 'start') {
+                ctx.font = '24px "Press Start 2P"';
+                ctx.strokeText('Click to Start', canvas.width / 2, canvas.height / 2);
+                ctx.fillText('Click to Start', canvas.width / 2, canvas.height / 2);
+                ctx.font = '16px "Press Start 2P"';
+                ctx.strokeText('Blink to Jump!', canvas.width / 2, canvas.height / 2 + 40);
+                ctx.fillText('Blink to Jump!', canvas.width / 2, canvas.height / 2 + 40);
+            } else if (gameState === 'over') {
+                ctx.font = '30px "Press Start 2P"';
+                ctx.strokeText('Game Over', canvas.width / 2, canvas.height / 2 - 40);
+                ctx.fillText('Game Over', canvas.width / 2, canvas.height / 2 - 40);
+                
+                ctx.font = '16px "Press Start 2P"';
+                ctx.strokeText(`High Score: ${highScore}`, canvas.width / 2, canvas.height / 2);
+                ctx.fillText(`High Score: ${highScore}`, canvas.width / 2, canvas.height / 2);
+
+                ctx.font = '16px "Press Start 2P"';
+                ctx.strokeText('Click to Restart', canvas.width / 2, canvas.height / 2 + 40);
+                ctx.fillText('Click to Restart', canvas.width / 2, canvas.height / 2 + 40);
+            }
+        }
+    }
+
+    // --- WebSocket Connection ---
+    function connectWebSocket() {
+        const socket = new WebSocket('ws://localhost:8080');
+        socket.onopen = function() {
+            console.log('WebSocket connection established.');
+            wsStatus.textContent = 'Connected';
+            wsStatusDot.classList.remove('bg-red-500');
+            wsStatusDot.classList.add('bg-green-500');
+        };
+        socket.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.address && (data.address.startsWith('/eeg') || data.address.startsWith('/emg'))) { 
+                    const signal = Math.abs(data.args[0]); 
+                    signalValueEl.textContent = signal.toFixed(2);
+                    handleBlinkData(signal);
+                }
+            } catch (error) {}
+        };
+        socket.onclose = function() {
+            console.log('WebSocket connection closed. Retrying in 3 seconds...');
+            wsStatus.textContent = 'Disconnected. Retrying...';
+            wsStatusDot.classList.remove('bg-green-500');
+            wsStatusDot.classList.add('bg-red-500');
+            setTimeout(connectWebSocket, 3000);
+        };
+        socket.onerror = function(error) {
+            console.error('WebSocket error:', error);
+            wsStatus.textContent = 'Error. Is bridge.js running?';
+        };
+    }
+
+    function handleBlinkData(value) {
+        if (isCalibrating) {
+            calibrationData.push(value);
+            if (calibrationData.length > 50) { calibrationData.shift(); }
+            const mean = calibrationData.reduce((a, b) => a + b, 0) / calibrationData.length;
+            const stdDev = Math.sqrt(calibrationData.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / calibrationData.length);
+            
+            // Adjusted the multiplier to find a good balance.
+            BLINK_THRESHOLD = Math.max(30, mean + 1.9 * stdDev); 
+            
+            thresholdValueEl.textContent = BLINK_THRESHOLD.toFixed(2);
+        }
+        if (gameState === 'playing' && value > BLINK_THRESHOLD) {
+            const now = Date.now();
+            // Reduced debounce time from 500ms to 150ms for a more responsive feel.
+            if (now - lastJumpTime > 150) { 
+                bird.jump();
+                lastJumpTime = now;
+            }
+        }
+    }
+
+    // --- Initial Setup ---
+    canvas.addEventListener('click', () => {
+        if (gameState === 'start' || gameState === 'over') {
+            resetGame();
+            gameState = 'playing';
+            isCalibrating = false;
+            console.log(`Calibration complete. Blink threshold set to: ${BLINK_THRESHOLD}`);
+        }
+    });
+
+    // --- Start Everything ---
+    resetGame();
+    gameLoop();
+    connectWebSocket();
+
+</script>
+</body>
+</html>
